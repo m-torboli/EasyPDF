@@ -32,6 +32,42 @@ function make(name: string, label: string, n: number, opts: { landscapeEvery?: n
   writeFileSync(join(out, name), doc.saveToBuffer(options).asUint8Array());
 }
 
+function contract() {
+  const doc = new mupdf.PDFDocument();
+  const f = {
+    T: doc.addSimpleFont(new mupdf.Font('Times-Roman')),
+    TB: doc.addSimpleFont(new mupdf.Font('Times-Bold')),
+    H: doc.addSimpleFont(new mupdf.Font('Helvetica-Bold')),
+    HR: doc.addSimpleFont(new mupdf.Font('Helvetica')),
+  };
+  const para = (y: number, lines: string[]) =>
+    `BT /T 12 Tf 0.1 0.1 0.12 rg 72 ${y} Td 16 TL ${lines.map((l) => `(${l}) Tj T*`).join(' ')} ET`;
+  const content = [
+    'q 0.93 0.35 0.23 rg 0 812 595 30 re f Q',
+    'BT /H 22 Tf 0.75 0.15 0.12 rg 72 760 Td (Contratto di fornitura) Tj ET',
+    'BT /HR 11 Tf 0.4 0.4 0.45 rg 72 740 Td (Rif. 2026/118 - Ufficio acquisti) Tj ET',
+    para(700, [
+      'Il presente contratto viene stipulato tra Mario Rossi, residente in Milano,',
+      'e la ditta Bianchi S.r.l., con sede legale in Torino, per la fornitura di',
+      'cento sedie da ufficio secondo le specifiche indicate nell\'allegato A.',
+    ]),
+    'BT /TB 13 Tf 0.1 0.1 0.12 rg 72 630 Td (Art. 1 - Pagamento) Tj ET',
+    para(606, [
+      'Il pagamento avverra entro trenta giorni dalla consegna, tramite bonifico',
+      'bancario sul conto corrente indicato dal fornitore.',
+    ]),
+    'BT /TB 13 Tf 0.1 0.1 0.12 rg 72 556 Td (Art. 2 - Consegna) Tj ET',
+    para(532, ['La consegna avverra presso la sede del cliente entro il 30 novembre 2026.']),
+    'BT /T 12 Tf 0.1 0.1 0.12 rg 400 440 Td (Milano, 11 ottobre 2026) Tj ET',
+    'BT /T 12 Tf 0.1 0.1 0.12 rg 72 380 Td (Firma del cliente) Tj 260 0 Td (Firma del fornitore) Tj ET',
+  ].join('\n');
+  const res = doc.addObject({ Font: f });
+  doc.insertPage(-1, doc.addPage([0, 0, 595, 842], 0, res, content));
+  doc.insertPage(-1, doc.addPage([0, 0, 595, 842], 0, res, para(760, ['Allegato A - Specifiche tecniche delle sedie.', 'Seduta imbottita, braccioli regolabili, ruote piroettanti.'])));
+  writeFileSync(join(out, 'contratto-da-modificare.pdf'), doc.saveToBuffer('compress').asUint8Array());
+}
+
+contract();
 make('relazione-12-pagine.pdf', 'Relazione', 12, { landscapeEvery: 5 });
 make('allegato-3-pagine.pdf', 'Allegato', 3);
 make('protetto-password-ciao.pdf', 'Riservato', 2, { password: 'ciao' });

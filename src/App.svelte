@@ -11,6 +11,7 @@
   import { notify, router } from './lib/state.svelte';
   import ExtractTool from './lib/tools/ExtractTool.svelte';
   import MergeTool from './lib/tools/MergeTool.svelte';
+  import EditTool from './lib/tools/EditTool.svelte';
 
   const { needRefresh, offlineReady, updateServiceWorker } = useRegisterSW();
 
@@ -36,6 +37,7 @@
   <!-- Gli strumenti restano montati: passando dall'uno all'altro non si perde il lavoro. -->
   <div class="tool" hidden={router.route !== 'extract'}><ExtractTool /></div>
   <div class="tool" hidden={router.route !== 'merge'}><MergeTool /></div>
+  <div class="tool" hidden={router.route !== 'edit'}><EditTool /></div>
 </main>
 
 <Toasts />

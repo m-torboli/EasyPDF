@@ -1,11 +1,11 @@
 // Stato globale dell'interfaccia: navigazione, notifiche, richiesta password, installazione.
 import { untrack } from 'svelte';
 
-export type Route = 'home' | 'extract' | 'merge';
+export type Route = 'home' | 'extract' | 'merge' | 'edit';
 
 function routeFromHash(): Route {
   const h = location.hash.replace(/^#\/?/, '');
-  return h === 'extract' || h === 'merge' ? h : 'home';
+  return h === 'extract' || h === 'merge' || h === 'edit' ? h : 'home';
 }
 
 export const router = $state<{ route: Route }>({ route: routeFromHash() });

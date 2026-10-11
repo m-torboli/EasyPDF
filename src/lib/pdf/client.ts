@@ -1,9 +1,12 @@
 // Interfaccia a promesse verso il Web Worker PDF.
-import type { ErrorCode, OpenResult, PickMsg, RenderResult, Request, Response } from './protocol';
+import type { ErrorCode, OpenResult, PickMsg, RenderEditedResult, RenderResult, Request, Response } from './protocol';
+import type { PageTextInfo, TextEdit } from './textEdit';
 
 export class PdfClientError extends Error {
-  constructor(public code: ErrorCode, message: string) {
+  code: ErrorCode;
+  constructor(code: ErrorCode, message: string = code) {
     super(message);
+    this.code = code;
   }
 }
 
@@ -86,4 +89,21 @@ export async function thumbnail(fileId: string, index: number, width: number): P
 
 export function build(parts: { fileId: string; pages: PickMsg[] }[]): Promise<Uint8Array> {
   return call<Uint8Array>({ type: 'build', parts });
+}
+
+// Gli oggetti di stato dell'interfaccia vanno copiati in dati semplici prima di passare al worker.
+const plain = <T>(v: T): T => JSON.parse(JSON.stringify(v));
+
+export function pageText(fileId: string, index: number): Promise<PageTextInfo> {
+  return call<PageTextInfo>({ type: 'pageText', fileId, index });
+}
+
+/** Rende una pagina con le modifiche al testo applicate (anteprima fedele al risultato). */
+export async function renderEdited(fileId: string, index: number, width: number, edits: TextEdit[]) {
+  const r = await call<RenderEditedResult>({ type: 'renderEdited', fileId, index, width, edits: plain(edits) });
+  return { url: URL.createObjectURL(new Blob([r.png as BlobPart], { type: 'image/png' })), width: r.width, height: r.height, reports: r.reports };
+}
+
+export function buildEdited(fileId: string, pages: { index: number; edits: TextEdit[] }[]): Promise<Uint8Array> {
+  return call<Uint8Array>({ type: 'buildEdited', fileId, pages: plain(pages) });
 }

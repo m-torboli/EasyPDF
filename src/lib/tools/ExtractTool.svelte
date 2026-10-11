@@ -1,12 +1,13 @@
 <script lang="ts">
   import { SvelteSet } from 'svelte/reactivity';
   import DropZone from '../components/DropZone.svelte';
+  import FileBar from '../components/FileBar.svelte';
   import Icon from '../components/Icon.svelte';
   import ResultDialog from '../components/ResultDialog.svelte';
   import StepTitle from '../components/StepTitle.svelte';
   import Thumb from '../components/Thumb.svelte';
   import { baseName, errorText, loadPdf, unloadPdf, type BuiltPdf, type LoadedPdf } from '../files';
-  import { formatBytes, i18n, pagesLabel, t } from '../i18n.svelte';
+  import { i18n, t } from '../i18n.svelte';
   import { formatPageRanges, parsePageRanges, rangesForFilename, type RangeError } from '../pageRanges';
   import { build } from '../pdf/client';
   import { moveItem, sortable } from '../sortable';
@@ -23,7 +24,6 @@
   let showValidation = $state(false);
   let lastClicked: number | null = null;
   let result = $state<BuiltPdf | null>(null);
-  let changeInput = $state<HTMLInputElement>();
 
   const picks = $derived(order.filter((i) => selected.has(i)).map((i) => ({ index: i, rotate: rotations[i] })));
   const orderChanged = $derived(order.some((v, i) => v !== i));
@@ -157,27 +157,7 @@
     <DropZone busy={opening} onfiles={open} />
   </section>
 {:else}
-  <section class="card filebar">
-    <span class="file-icon"><Icon name="fileText" size={22} /></span>
-    <div class="file-meta">
-      <p class="file-name">{pdf.name}</p>
-      <p class="file-sub">{pagesLabel(pdf.pageCount)} · {formatBytes(pdf.size)}</p>
-    </div>
-    <button class="btn btn-sm" onclick={() => changeInput?.click()} disabled={opening}>
-      <Icon name="refresh" size={16} />
-      {t('extract.changeFile')}
-    </button>
-    <input
-      bind:this={changeInput}
-      type="file"
-      accept="application/pdf,.pdf"
-      hidden
-      onchange={(e) => {
-        open([...(e.currentTarget.files ?? [])]);
-        e.currentTarget.value = '';
-      }}
-    />
-  </section>
+  <FileBar {pdf} busy={opening} onchange={open} />
 
   <section class="card section">
     <StepTitle n={2} title={t('step.pick')} done={picks.length > 0 && !rangeError}>
@@ -304,38 +284,6 @@
       width: 26px;
     }
   }
-  .filebar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 14px;
-    margin-bottom: 14px;
-  }
-  .file-icon {
-    width: 40px;
-    height: 40px;
-    flex: none;
-    display: grid;
-    place-items: center;
-    border-radius: var(--r);
-    background: var(--coral-soft);
-    color: var(--coral);
-  }
-  .file-meta {
-    flex: 1;
-    min-width: 0;
-  }
-  .file-name {
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .file-sub {
-    font-size: 13px;
-    color: var(--ink-2);
-  }
-
   .range {
     margin-bottom: 18px;
   }

@@ -5,8 +5,10 @@ import * as mupdf from 'mupdf';
 export type PdfErrorCode = 'not_pdf' | 'damaged' | 'needs_password' | 'wrong_password' | 'empty';
 
 export class PdfError extends Error {
-  constructor(public code: PdfErrorCode, message: string = code) {
+  code: PdfErrorCode;
+  constructor(code: PdfErrorCode, message: string = code) {
     super(message);
+    this.code = code;
   }
 }
 

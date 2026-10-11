@@ -5,9 +5,10 @@
   import Icon from './Icon.svelte';
   import type { IconName } from './icons';
 
-  const tabs: { route: Route; icon: IconName; key: 'tool.extract.title' | 'tool.merge.title' }[] = [
+  const tabs: { route: Route; icon: IconName; key: 'tool.extract.title' | 'tool.merge.title' | 'tool.edit.title' }[] = [
     { route: 'extract', icon: 'scissors', key: 'tool.extract.title' },
     { route: 'merge', icon: 'files', key: 'tool.merge.title' },
+    { route: 'edit', icon: 'pencil', key: 'tool.edit.title' },
   ];
 </script>
 
@@ -142,12 +143,12 @@
     background: var(--violet);
     color: #fff;
   }
-  @media (max-width: 760px) {
+  @media (max-width: 1000px) {
     .install-label {
       display: none;
     }
   }
-  @media (max-width: 600px) {
+  @media (max-width: 820px) {
     .bar {
       flex-wrap: wrap;
       gap: 8px 12px;
@@ -164,6 +165,17 @@
     }
     .word {
       font-size: 17px;
+    }
+  }
+  @media (max-width: 480px) {
+    nav {
+      gap: 2px;
+    }
+    .tab {
+      flex-direction: column;
+      gap: 2px;
+      padding: 6px 4px;
+      font-size: 12px;
     }
   }
 </style>

@@ -2,6 +2,7 @@
 import type * as mupdf from 'mupdf';
 import { buildPdf, openPdf, PdfError, renderPage, type PagePick } from './engine';
 import type { Request, Response } from './protocol';
+import { applyTextEdits, getPageText } from './textEdit';
 
 interface OpenFile {
   bytes: Uint8Array;
@@ -40,6 +41,33 @@ function handle(req: Request): { result: unknown; transfer?: Transferable[] } {
         }),
       );
       return { result: bytes, transfer: [bytes.buffer] };
+    }
+    case 'pageText':
+      return { result: getPageText(getFile(req.fileId).doc, req.index) };
+    case 'renderEdited': {
+      // Le modifiche si applicano a una copia appena riaperta: annullarle è immediato.
+      const f = getFile(req.fileId);
+      const copy = openPdf(f.bytes, f.password);
+      try {
+        const reports = applyTextEdits(copy, req.index, req.edits);
+        const r = renderPage(copy, req.index, req.width);
+        return { result: { ...r, reports }, transfer: [r.png.buffer] };
+      } finally {
+        copy.destroy();
+      }
+    }
+    case 'buildEdited': {
+      const f = getFile(req.fileId);
+      const copy = openPdf(f.bytes, f.password);
+      try {
+        for (const p of req.pages) applyTextEdits(copy, p.index, p.edits);
+        const out = copy.saveToBuffer('garbage=compact,compress,decrypt');
+        const bytes = out.asUint8Array().slice();
+        out.destroy();
+        return { result: bytes, transfer: [bytes.buffer] };
+      } finally {
+        copy.destroy();
+      }
     }
     case 'close': {
       files.get(req.fileId)?.doc.destroy();

@@ -8,7 +8,7 @@
   const tools: { route?: Route; icon: IconName; title: MessageKey; desc: MessageKey; tone: string }[] = [
     { route: 'extract', icon: 'scissors', title: 'tool.extract.title', desc: 'tool.extract.desc', tone: 'coral' },
     { route: 'merge', icon: 'files', title: 'tool.merge.title', desc: 'tool.merge.desc', tone: 'violet' },
-    { icon: 'pencil', title: 'tool.edit.title', desc: 'tool.edit.desc', tone: 'sun' },
+    { route: 'edit', icon: 'pencil', title: 'tool.edit.title', desc: 'tool.edit.desc', tone: 'sun' },
     { icon: 'photo', title: 'tool.images.title', desc: 'tool.images.desc', tone: 'mint' },
   ];
 </script>
