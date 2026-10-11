@@ -1,0 +1,7 @@
+node_modules
+dist
+test-fixtures
+.DS_Store
+*.local
+dev-dist
+.claude/
