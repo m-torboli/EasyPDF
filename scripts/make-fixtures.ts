@@ -67,7 +67,39 @@ function contract() {
   writeFileSync(join(out, 'contratto-da-modificare.pdf'), doc.saveToBuffer('compress').asUint8Array());
 }
 
+function gradient(w: number, h: number, a: number[], b: number[]): mupdf.Pixmap {
+  const pix = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, w, h], false);
+  const px = pix.getPixels();
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const t = (x + y) / (w + h);
+      const i = (y * w + x) * 3;
+      for (let c = 0; c < 3; c++) px[i + c] = a[c] + (b[c] - a[c]) * t;
+    }
+  return pix;
+}
+
+function flyer() {
+  const doc = new mupdf.PDFDocument();
+  const bg = doc.addImage(new mupdf.Image(gradient(60, 80, [255, 248, 236], [250, 225, 205])));
+  const logo = doc.addImage(new mupdf.Image(gradient(80, 80, [238, 90, 58], [91, 63, 214])));
+  const photo = doc.addImage(new mupdf.Image(gradient(300, 200, [40, 140, 120], [244, 182, 60])));
+  const font = doc.addSimpleFont(new mupdf.Font('Helvetica-Bold'));
+  const res = doc.addObject({ XObject: { Bg: bg, Logo: logo, Photo: photo }, Font: { F: font } });
+  const content = [
+    'q 595 0 0 842 0 0 cm /Bg Do Q',
+    'q 90 0 0 90 72 700 cm /Logo Do Q',
+    'BT /F 30 Tf 0.11 0.1 0.18 rg 190 735 Td (Festa d\'autunno) Tj ET',
+    'q 451 0 0 300 72 330 cm /Photo Do Q',
+    'BT /F 16 Tf 0.11 0.1 0.18 rg 72 290 Td (Sabato 25 ottobre, piazza centrale) Tj ET',
+  ].join('\n');
+  doc.insertPage(-1, doc.addPage([0, 0, 595, 842], 0, res, content));
+  writeFileSync(join(out, 'volantino-con-immagini.pdf'), doc.saveToBuffer('compress').asUint8Array());
+  writeFileSync(join(out, 'nuova-immagine.png'), gradient(240, 120, [91, 63, 214], [30, 200, 160]).asPNG());
+}
+
 contract();
+flyer();
 make('relazione-12-pagine.pdf', 'Relazione', 12, { landscapeEvery: 5 });
 make('allegato-3-pagine.pdf', 'Allegato', 3);
 make('protetto-password-ciao.pdf', 'Riservato', 2, { password: 'ciao' });

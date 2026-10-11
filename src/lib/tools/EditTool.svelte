@@ -4,16 +4,20 @@
   import DropZone from '../components/DropZone.svelte';
   import FileBar from '../components/FileBar.svelte';
   import Icon from '../components/Icon.svelte';
+  import ImagePanel from '../components/ImagePanel.svelte';
   import ResultDialog from '../components/ResultDialog.svelte';
   import StepTitle from '../components/StepTitle.svelte';
   import Thumb from '../components/Thumb.svelte';
   import { baseName, errorText, loadPdf, unloadPdf, type BuiltPdf, type LoadedPdf } from '../files';
   import { i18n, t } from '../i18n.svelte';
-  import { buildEdited, pageText, renderEdited, thumbnail } from '../pdf/client';
-  import type { EditReport, FontFamily, PageTextInfo, TextBlockInfo, TextEdit, TextStyle } from '../pdf/textEdit';
-  import { notify } from '../state.svelte';
+  import { prepareImage, type PreparedImage } from '../images';
+  import { buildEdited, pageInfo, renderEdited, thumbnail } from '../pdf/client';
+  import type { ImageEdit, ImageInfo, Rect } from '../pdf/imageEdit';
+  import type { PageEdits, PageInfo } from '../pdf/protocol';
+  import type { EditReport, FontFamily, TextBlockInfo, TextEdit, TextStyle } from '../pdf/textEdit';
+  import { editMode, notify } from '../state.svelte';
 
-  interface EditEntry {
+  interface TextEntry {
     key: string;
     kind: 'replace' | 'add';
     blockId?: number;
@@ -25,9 +29,23 @@
     width?: number;
   }
 
+  interface ImageEntry {
+    key: string;
+    kind: 'imgDelete' | 'imgReplace' | 'imgAdd';
+    /** Indice dell'immagine esistente sulla pagina (eliminazione e sostituzione). */
+    imageIdx?: number;
+    /** Immagine scelta dall'utente (sostituzione e aggiunta). */
+    imageId?: string;
+    fit?: 'contain' | 'fill';
+    rect?: Rect;
+  }
+
+  type Entry = TextEntry | ImageEntry;
+  const isText = (e: Entry): e is TextEntry => e.kind === 'replace' || e.kind === 'add';
+
   interface Draft {
     page: number;
-    entry: EditEntry;
+    entry: TextEntry;
     isNew: boolean;
   }
 
@@ -35,15 +53,26 @@
   let opening = $state(false);
   let building = $state(false);
   let pageIndex = $state(0);
-  const infos = new SvelteMap<number, PageTextInfo>();
+  const infos = new SvelteMap<number, PageInfo>();
   // Modifiche confermate: pagina -> chiave -> modifica.
-  let edits = $state<Record<number, Record<string, EditEntry>>>({});
-  let history = $state<{ page: number; key: string; before: EditEntry | null }[]>([]);
+  let edits = $state<Record<number, Record<string, Entry>>>({});
+  let history = $state<{ page: number; key: string; before: Entry | null }[]>([]);
   let draft = $state<Draft | null>(null);
   let adding = $state(false);
   let addCounter = 0;
   let showValidation = $state(false);
   let result = $state<BuiltPdf | null>(null);
+
+  // Immagini
+  const prepared = new SvelteMap<string, PreparedImage>();
+  let selImage = $state<string | null>(null);
+  let placing = $state<PreparedImage | null>(null);
+  let preparingImage = $state(false);
+  let imageInput = $state<HTMLInputElement>();
+  let imagePurpose: 'add' | 'replace' = 'add';
+  let drag = $state<{ key: string; rect: Rect } | null>(null);
+
+  const mode = $derived(editMode.mode);
 
   // Anteprima della pagina corrente.
   let view = $state<{ page: number; url: string; owned: boolean; reports: Record<string, EditReport> } | null>(null);
@@ -51,6 +80,7 @@
   let renderSeq = 0;
   let stageWidth = $state(600);
   let textarea = $state<HTMLTextAreaElement>();
+  let sheetEl = $state<HTMLDivElement>();
 
   const info = $derived(infos.get(pageIndex) ?? null);
   const pageEdits = (p: number) => Object.values(edits[p] ?? {});
@@ -58,6 +88,12 @@
   const countLabel = $derived(totalEdits === 0 ? t('edit.countNone') : totalEdits === 1 ? t('edit.countOne') : t('edit.count', { n: totalEdits }));
   const draftBlock = $derived(draft?.entry.blockId !== undefined ? (info?.blocks[draft.entry.blockId] ?? null) : null);
   const draftReport = $derived(draft && view?.page === draft.page ? (view.reports[draft.entry.key] ?? null) : null);
+  const selEntry = $derived(selImage ? ((edits[pageIndex]?.[selImage] as ImageEntry | undefined) ?? null) : null);
+  const selInfo = $derived.by(() => {
+    if (!selImage || !info) return null;
+    const idx = selImage.startsWith('i') ? Number(selImage.slice(1)) : selEntry?.imageIdx;
+    return idx !== undefined ? (info.images[idx] ?? null) : null;
+  });
 
   async function open(files: File[]) {
     if (!files.length || opening) return;
@@ -85,6 +121,8 @@
     history = [];
     draft = null;
     adding = false;
+    selImage = null;
+    placing = null;
     pageIndex = 0;
     showValidation = false;
   }
@@ -93,10 +131,12 @@
     if (!pdf) return;
     if (draft) commitDraft();
     adding = false;
+    placing = null;
+    selImage = null;
     pageIndex = index;
     if (!infos.has(index)) {
       try {
-        infos.set(index, await pageText(pdf.id, index));
+        infos.set(index, await pageInfo(pdf.id, index));
       } catch (e) {
         notify('error', errorText(e));
       }
@@ -104,41 +144,70 @@
     await render();
   }
 
-  // --- Anteprima -------------------------------------------------------------------
-
-  function toTextEdit(e: EditEntry, pageInfo: PageTextInfo): TextEdit | null {
-    if (e.kind === 'add') {
-      return { kind: 'add', x: e.x!, y: e.y!, width: e.width!, text: e.text, style: e.style };
-    }
-    const block = pageInfo.blocks[e.blockId!];
-    if (!block) return null;
-    return { kind: 'replace', block, text: e.text, style: e.style, sizeLocked: e.sizeLocked };
+  function setMode(m: 'text' | 'images') {
+    if (draft) commitDraft();
+    adding = false;
+    placing = null;
+    selImage = null;
+    editMode.mode = m;
   }
 
-  /** Modifiche della pagina, inclusa quella in corso nel pannello. */
-  function entriesFor(page: number): EditEntry[] {
+  // --- Conversione in modifiche per il motore -------------------------------------------
+
+  function toPageEdits(entries: Entry[], page: PageInfo, forPreview: boolean): { edits: PageEdits; textKeys: string[] } {
+    const text: TextEdit[] = [];
+    const textKeys: string[] = [];
+    const images: ImageEdit[] = [];
+    for (const e of entries) {
+      if (isText(e)) {
+        if (e.kind === 'add') {
+          if (e.text.trim() === '') continue;
+          text.push({ kind: 'add', x: e.x!, y: e.y!, width: e.width!, text: e.text, style: e.style });
+        } else {
+          const block = page.blocks[e.blockId!];
+          if (!block) continue;
+          text.push({ kind: 'replace', block, text: e.text, style: e.style, sizeLocked: e.sizeLocked });
+        }
+        textKeys.push(e.key);
+      } else if (e.kind === 'imgAdd') {
+        // Durante la modifica le immagini aggiunte sono mostrate sopra la pagina, per
+        // poterle spostare con fluidità; nel PDF finale vengono disegnate davvero.
+        if (!forPreview) images.push({ kind: 'addImage', rect: e.rect!, imageId: e.imageId! });
+      } else {
+        const target = page.images[e.imageIdx!];
+        if (!target) continue;
+        if (e.kind === 'imgDelete') images.push({ kind: 'deleteImage', target });
+        else images.push({ kind: 'replaceImage', target, imageId: e.imageId!, fit: e.fit ?? 'contain' });
+      }
+    }
+    return { edits: { text, images }, textKeys };
+  }
+
+  /** Modifiche della pagina, inclusa quella di testo in corso nel pannello. */
+  function entriesFor(page: number): Entry[] {
     const map = { ...(edits[page] ?? {}) };
     if (draft && draft.page === page) map[draft.entry.key] = draft.entry;
-    return Object.values(map).filter((e) => !(e.kind === 'add' && e.text.trim() === ''));
+    return Object.values(map);
   }
+
+  // --- Anteprima -------------------------------------------------------------------
 
   async function render() {
     if (!pdf) return;
     const page = pageIndex;
-    const pageInfo = infos.get(page);
-    const entries = pageInfo ? entriesFor(page) : [];
-    const width = Math.min(2000, Math.round((Math.max(320, stageWidth) * Math.min(2, window.devicePixelRatio || 1)) / 50) * 50);
+    const pi = infos.get(page);
     const seq = ++renderSeq;
+    const width = Math.min(2000, Math.round((Math.max(320, stageWidth) * Math.min(2, window.devicePixelRatio || 1)) / 50) * 50);
     rendering = true;
     try {
       let next: NonNullable<typeof view>;
-      if (entries.length === 0) {
+      const { edits: pe, textKeys } = pi ? toPageEdits(entriesFor(page), pi, true) : { edits: { text: [], images: [] }, textKeys: [] };
+      if (pe.text.length === 0 && pe.images.length === 0) {
         next = { page, url: await thumbnail(pdf.id, page, width), owned: false, reports: {} };
       } else {
-        const list = entries.map((e) => ({ e, edit: toTextEdit(e, pageInfo!) })).filter((x) => x.edit !== null);
-        const r = await renderEdited(pdf.id, page, width, list.map((x) => x.edit!));
+        const r = await renderEdited(pdf.id, page, width, pe);
         const reports: Record<string, EditReport> = {};
-        list.forEach((x, i) => (reports[x.e.key] = r.reports[i]));
+        textKeys.forEach((k, i) => (reports[k] = r.reports[i]));
         next = { page, url: r.url, owned: true, reports };
       }
       if (seq !== renderSeq) {
@@ -170,12 +239,12 @@
     }
   });
 
-  // --- Modifiche -----------------------------------------------------------------
+  // --- Modifiche del testo ------------------------------------------------------------
 
   function selectBlock(block: TextBlockInfo) {
     if (draft?.entry.key === `b${block.id}`) return;
     if (draft) commitDraft();
-    const existing = edits[pageIndex]?.[`b${block.id}`];
+    const existing = edits[pageIndex]?.[`b${block.id}`] as TextEntry | undefined;
     draft = {
       page: pageIndex,
       isNew: !existing,
@@ -186,18 +255,26 @@
     focusTextarea();
   }
 
-  function selectAdded(entry: EditEntry) {
+  function selectAdded(entry: TextEntry) {
     if (draft?.entry.key === entry.key) return;
     if (draft) commitDraft();
     draft = { page: pageIndex, isNew: false, entry: structuredClone($state.snapshot(entry)) };
     focusTextarea();
   }
 
+  function pagePoint(ev: MouseEvent): [number, number] {
+    const rect = sheetEl!.getBoundingClientRect();
+    return [((ev.clientX - rect.left) / rect.width) * info!.width, ((ev.clientY - rect.top) / rect.height) * info!.height];
+  }
+
+  function onSheetClick(ev: MouseEvent) {
+    if (!info) return;
+    if (placing) placeImage(ev);
+    else if (adding) placeText(ev);
+  }
+
   function placeText(ev: MouseEvent) {
-    if (!adding || !info) return;
-    const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
-    const x = ((ev.clientX - rect.left) / rect.width) * info.width;
-    const y = ((ev.clientY - rect.top) / rect.height) * info.height;
+    const [x, y] = pagePoint(ev);
     adding = false;
     if (draft) commitDraft();
     draft = {
@@ -211,7 +288,7 @@
         sizeLocked: true,
         x,
         y: Math.max(0, y - 8),
-        width: Math.max(80, Math.min(320, info.width - x - 20)),
+        width: Math.max(80, Math.min(320, info!.width - x - 20)),
       },
     };
     focusTextarea();
@@ -228,26 +305,26 @@
     }
   }
 
-  function isNoop(e: EditEntry): boolean {
+  function isNoop(e: TextEntry): boolean {
     if (e.kind === 'add') return e.text.trim() === '';
     const block = infos.get(draft?.page ?? pageIndex)?.blocks[e.blockId!];
     return !!block && e.text === block.text && !e.sizeLocked && JSON.stringify(e.style) === JSON.stringify(block.style);
   }
 
-  function setEntry(page: number, key: string, entry: EditEntry | null) {
+  function setEntry(page: number, key: string, entry: Entry | null) {
     const before = edits[page]?.[key] ?? null;
     const pageMap = { ...(edits[page] ?? {}) };
     if (entry) pageMap[key] = entry;
     else delete pageMap[key];
     edits = { ...edits, [page]: pageMap };
-    history = [...history, { page, key, before: before ? $state.snapshot(before) : null }];
+    history = [...history, { page, key, before: before ? ($state.snapshot(before) as Entry) : null }];
   }
 
   function commitDraft() {
     if (!draft) return;
     const { page, entry } = draft;
     const had = !!edits[page]?.[entry.key];
-    const entrySnap = $state.snapshot(entry) as EditEntry;
+    const entrySnap = $state.snapshot(entry) as TextEntry;
     if (isNoop(entrySnap)) {
       if (had) setEntry(page, entry.key, null);
     } else {
@@ -275,7 +352,7 @@
     if (entry.kind === 'add') {
       if (edits[page]?.[entry.key]) setEntry(page, entry.key, null);
     } else {
-      setEntry(page, entry.key, { ...($state.snapshot(entry) as EditEntry), text: '' });
+      setEntry(page, entry.key, { ...($state.snapshot(entry) as TextEntry), text: '' });
     }
     draft = null;
     scheduleRender(0);
@@ -310,6 +387,130 @@
     scheduleRender(0);
   }
 
+  // --- Modifiche delle immagini ------------------------------------------------------
+
+  function selectImage(key: string) {
+    if (draft) commitDraft();
+    selImage = key;
+    if (window.innerWidth <= 700) {
+      tick().then(() => {
+        const box = document.querySelector('.tool:not([hidden]) .imgbox.selected');
+        if (box) window.scrollBy({ top: box.getBoundingClientRect().top - 120, behavior: 'smooth' });
+      });
+    }
+  }
+
+  function chooseImage(purpose: 'add' | 'replace') {
+    imagePurpose = purpose;
+    imageInput?.click();
+  }
+
+  async function onImageFile(file: File | undefined) {
+    if (!file) return;
+    preparingImage = true;
+    try {
+      const img = await prepareImage(file);
+      prepared.set(img.id, img);
+      if (imagePurpose === 'replace' && selImage?.startsWith('i')) {
+        const prev = edits[pageIndex]?.[selImage] as ImageEntry | undefined;
+        setEntry(pageIndex, selImage, { key: selImage, kind: 'imgReplace', imageIdx: Number(selImage.slice(1)), imageId: img.id, fit: prev?.fit ?? 'contain' });
+        scheduleRender(0);
+      } else {
+        placing = img;
+        selImage = null;
+      }
+    } catch (e) {
+      notify('error', errorText(e));
+    } finally {
+      preparingImage = false;
+    }
+  }
+
+  function placeImage(ev: MouseEvent) {
+    const img = placing!;
+    placing = null;
+    const [x, y] = pagePoint(ev);
+    // Larghezza iniziale: quella naturale dell'immagine (circa 150 dpi), al massimo il 40% della pagina.
+    const w = Math.min(info!.width * 0.4, img.width * 0.48);
+    const h = (w * img.height) / img.width;
+    const x0 = Math.max(0, Math.min(info!.width - w, x - w / 2));
+    const y0 = Math.max(0, Math.min(info!.height - h, y - h / 2));
+    const key = `n${++addCounter}`;
+    setEntry(pageIndex, key, { key, kind: 'imgAdd', imageId: img.id, rect: [x0, y0, x0 + w, y0 + h] });
+    selImage = key;
+  }
+
+  function deleteImage() {
+    if (!selImage) return;
+    if (selImage.startsWith('n')) {
+      setEntry(pageIndex, selImage, null);
+      selImage = null;
+    } else {
+      setEntry(pageIndex, selImage, { key: selImage, kind: 'imgDelete', imageIdx: Number(selImage.slice(1)) });
+    }
+    scheduleRender(0);
+  }
+
+  function restoreImage() {
+    if (!selImage) return;
+    setEntry(pageIndex, selImage, null);
+    scheduleRender(0);
+  }
+
+  function setFit(fit: 'contain' | 'fill') {
+    if (!selImage || !selEntry || selEntry.kind !== 'imgReplace') return;
+    setEntry(pageIndex, selImage, { ...($state.snapshot(selEntry) as ImageEntry), fit });
+    scheduleRender(0);
+  }
+
+  // Spostamento e ridimensionamento delle immagini aggiunte (mouse e dito).
+  function startDrag(ev: PointerEvent, entry: ImageEntry, resize: boolean) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (draft) commitDraft();
+    selImage = entry.key;
+    const target = ev.currentTarget as HTMLElement;
+    try {
+      target.setPointerCapture(ev.pointerId);
+    } catch {
+      // non disponibile: il movimento viene seguito comunque sulla finestra
+    }
+    const sheet = sheetEl!.getBoundingClientRect();
+    const k = info!.width / sheet.width;
+    const start = entry.rect!;
+    const [sx, sy] = [ev.clientX, ev.clientY];
+    const aspect = (start[3] - start[1]) / (start[2] - start[0]);
+    let moved = false;
+
+    const move = (e: PointerEvent) => {
+      const dx = (e.clientX - sx) * k;
+      const dy = (e.clientY - sy) * k;
+      if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 3) moved = true;
+      let r: Rect;
+      if (resize) {
+        const w = Math.max(16, Math.min(info!.width - start[0], start[2] - start[0] + dx));
+        r = [start[0], start[1], start[0] + w, start[1] + w * aspect];
+      } else {
+        const w = start[2] - start[0];
+        const h = start[3] - start[1];
+        const x0 = Math.max(-w / 2, Math.min(info!.width - w / 2, start[0] + dx));
+        const y0 = Math.max(-h / 2, Math.min(info!.height - h / 2, start[1] + dy));
+        r = [x0, y0, x0 + w, y0 + h];
+      }
+      drag = { key: entry.key, rect: r };
+    };
+    const end = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+      if (moved && drag) setEntry(pageIndex, entry.key, { ...($state.snapshot(entry) as ImageEntry), rect: drag.rect });
+      drag = null;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+  }
+
   // --- Creazione del PDF ------------------------------------------------------------
 
   async function create() {
@@ -318,18 +519,16 @@
     if (!pdf || totalEdits === 0) return;
     building = true;
     try {
-      const pages: { index: number; edits: TextEdit[] }[] = [];
+      const pages: { index: number; edits: PageEdits }[] = [];
       for (const [p, map] of Object.entries(edits)) {
         const index = Number(p);
-        let pageInfo = infos.get(index);
-        if (!pageInfo) {
-          pageInfo = await pageText(pdf.id, index);
-          infos.set(index, pageInfo);
+        let pi = infos.get(index);
+        if (!pi) {
+          pi = await pageInfo(pdf.id, index);
+          infos.set(index, pi);
         }
-        const list = Object.values(map)
-          .map((e) => toTextEdit(e, pageInfo!))
-          .filter((x): x is TextEdit => x !== null);
-        if (list.length) pages.push({ index, edits: list });
+        const { edits: pe } = toPageEdits(Object.values(map), pi, false);
+        if (pe.text.length || pe.images.length) pages.push({ index, edits: pe });
       }
       const bytes = await buildEdited(pdf.id, pages);
       const word = i18n.lang === 'it' ? 'modificato' : 'edited';
@@ -344,24 +543,31 @@
 
   // --- Utilità di visualizzazione -----------------------------------------------------
 
-  function boxStyle(r: [number, number, number, number], pad = 2) {
+  function boxStyle(r: Rect, pad = 2) {
     if (!info) return '';
     const [x0, y0, x1, y1] = [r[0] - pad, r[1] - pad, r[2] + pad, r[3] + pad];
     return `left:${(x0 / info.width) * 100}%;top:${(y0 / info.height) * 100}%;width:${((x1 - x0) / info.width) * 100}%;height:${((y1 - y0) / info.height) * 100}%`;
   }
 
-  function addedRect(e: EditEntry): [number, number, number, number] {
+  function addedRect(e: TextEntry): Rect {
     const r = view?.page === pageIndex ? view.reports[e.key]?.bbox : null;
     return r ?? [e.x!, e.y!, e.x! + e.width!, e.y! + e.style.size * 1.4];
   }
 
-  const addedEntries = $derived.by(() => {
-    const list = Object.values(edits[pageIndex] ?? {}).filter((e) => e.kind === 'add');
+  const addedTexts = $derived.by(() => {
+    const list = Object.values(edits[pageIndex] ?? {}).filter((e): e is TextEntry => e.kind === 'add');
     if (draft && draft.page === pageIndex && draft.entry.kind === 'add' && !list.some((e) => e.key === draft!.entry.key)) list.push(draft.entry);
     return list;
   });
 
+  const addedImages = $derived(Object.values(edits[pageIndex] ?? {}).filter((e): e is ImageEntry => e.kind === 'imgAdd'));
+
   const editedKeys = $derived(new Set(Object.keys(edits[pageIndex] ?? {})));
+
+  function imageState(img: ImageInfo): 'original' | 'deleted' | 'replaced' {
+    const e = edits[pageIndex]?.[`i${img.id}`];
+    return e?.kind === 'imgDelete' ? 'deleted' : e?.kind === 'imgReplace' ? 'replaced' : 'original';
+  }
 
   const colorName = (c: [number, number, number]) => `rgb(${c.map((v) => Math.round(v * 255)).join(',')})`;
 </script>
@@ -375,16 +581,38 @@
   <FileBar {pdf} busy={opening} onchange={open} />
 
   <section class="card section">
-    <StepTitle n={2} title={t('step.editPick')} done={totalEdits > 0}>
+    <StepTitle n={2} title={mode === 'text' ? t('step.editPick') : t('step.editPickImages')} done={totalEdits > 0}>
       {#snippet aside()}
-        <button class="btn btn-sm" class:active-add={adding} onclick={() => (adding = !adding)} aria-pressed={adding}>
-          <Icon name={adding ? 'x' : 'plus'} size={16} />{adding ? t('edit.stopAdd') : t('edit.addText')}
-        </button>
-        <button class="btn btn-ghost btn-sm" onclick={undo} disabled={!draft && history.length === 0} title={t('edit.undo')}>
+        <div class="mode" role="group" aria-label={t('edit.modeLabel')}>
+          <button class:on={mode === 'text'} aria-pressed={mode === 'text'} onclick={() => setMode('text')}><Icon name="pencil" size={15} />{t('edit.modeText')}</button>
+          <button class:on={mode === 'images'} aria-pressed={mode === 'images'} onclick={() => setMode('images')}><Icon name="photo" size={15} />{t('edit.modeImages')}</button>
+        </div>
+        {#if mode === 'text'}
+          <button class="btn btn-sm" class:active-add={adding} onclick={() => (adding = !adding)} aria-pressed={adding}>
+            <Icon name={adding ? 'x' : 'plus'} size={16} />{adding ? t('edit.stopAdd') : t('edit.addText')}
+          </button>
+        {:else if placing}
+          <button class="btn btn-sm active-add" onclick={() => (placing = null)}><Icon name="x" size={16} />{t('image.cancelPlace')}</button>
+        {:else}
+          <button class="btn btn-sm" onclick={() => chooseImage('add')} disabled={preparingImage}>
+            <Icon name="plus" size={16} />{preparingImage ? t('image.preparing') : t('image.add')}
+          </button>
+        {/if}
+        <button class="btn btn-ghost btn-sm" onclick={undo} disabled={!draft && history.length === 0} title={t('edit.undo')} aria-label={t('edit.undo')}>
           <Icon name="rotateLeft" size={16} /><span class="hide-sm">{t('edit.undo')}</span>
         </button>
       {/snippet}
     </StepTitle>
+    <input
+      bind:this={imageInput}
+      type="file"
+      accept="image/*"
+      hidden
+      onchange={(e) => {
+        onImageFile(e.currentTarget.files?.[0]);
+        e.currentTarget.value = '';
+      }}
+    />
 
     <div class="layout">
       <nav class="pages" aria-label={t('edit.pagesLabel')}>
@@ -406,22 +634,31 @@
           {#if rendering}<span class="updating"><span class="spinner"></span>{t('edit.updating')}</span>{/if}
         </div>
 
-        {#if adding}
-          <p class="msg msg-info note add-note"><Icon name="info" size={16} />{t('edit.addHint')}</p>
-        {:else if info?.scanned}
-          <p class="msg msg-info note"><Icon name="photo" size={16} />{t('edit.scanned')}</p>
-        {:else if info && info.blocks.length === 0}
-          <p class="msg msg-info note"><Icon name="info" size={16} />{t('edit.noText')}</p>
+        {#if mode === 'text'}
+          {#if adding}
+            <p class="msg msg-info note add-note"><Icon name="info" size={16} />{t('edit.addHint')}</p>
+          {:else if info?.scanned}
+            <p class="msg msg-info note"><Icon name="photo" size={16} />{t('edit.scanned')}</p>
+          {:else if info && info.blocks.length === 0}
+            <p class="msg msg-info note"><Icon name="info" size={16} />{t('edit.noText')}</p>
+          {:else}
+            <p class="msg msg-info note"><Icon name="pencil" size={16} />{t('edit.hint')}</p>
+          {/if}
+        {:else if placing}
+          <p class="msg msg-info note add-note"><Icon name="info" size={16} />{t('image.placeHint')}</p>
+        {:else if info && info.images.length === 0}
+          <p class="msg msg-info note"><Icon name="info" size={16} />{t('image.none')}</p>
         {:else}
-          <p class="msg msg-info note"><Icon name="pencil" size={16} />{t('edit.hint')}</p>
+          <p class="msg msg-info note"><Icon name="photo" size={16} />{t('image.hint')}</p>
         {/if}
 
         <div class="sheet-wrap" bind:clientWidth={stageWidth}>
           {#if view && info}
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div class="sheet" class:adding style:aspect-ratio="{info.width} / {info.height}" onclick={placeText}>
+            <div bind:this={sheetEl} class="sheet" class:adding={adding || !!placing} style:aspect-ratio="{info.width} / {info.height}" onclick={onSheetClick}>
               <img src={view.url} alt={t('extract.pageLabel', { n: pageIndex + 1 })} draggable="false" />
-              {#if !adding}
+
+              {#if mode === 'text' && !adding}
                 {#each info.blocks as block (block.id)}
                   {@const key = `b${block.id}`}
                   <button
@@ -442,7 +679,7 @@
                     {/if}
                   </button>
                 {/each}
-                {#each addedEntries as entry (entry.key)}
+                {#each addedTexts as entry (entry.key)}
                   <button
                     class="box added"
                     class:selected={draft?.entry.key === entry.key}
@@ -457,6 +694,48 @@
                   </button>
                 {/each}
               {/if}
+
+              {#if mode === 'images' && !placing}
+                {#each info.images as img (img.id)}
+                  {@const key = `i${img.id}`}
+                  {@const st = imageState(img)}
+                  <button
+                    class="imgbox"
+                    class:deleted={st === 'deleted'}
+                    class:replaced={st === 'replaced'}
+                    class:selected={selImage === key}
+                    style={boxStyle(img.bbox, 1)}
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      selectImage(key);
+                    }}
+                    aria-label={t('image.label', { n: img.id + 1 })}
+                  >
+                    {#if st === 'deleted'}<span class="tag del">{t('image.deletedBadge')}</span>
+                    {:else if st === 'replaced'}<span class="tag">{t('image.replacedBadge')}</span>{/if}
+                  </button>
+                {/each}
+              {/if}
+
+              {#each addedImages as entry (entry.key)}
+                {@const r = drag?.key === entry.key ? drag.rect : entry.rect!}
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div
+                  class="added-img"
+                  class:selected={selImage === entry.key}
+                  class:inert={mode !== 'images' || !!placing}
+                  style={boxStyle(r, 0)}
+                  onpointerdown={(e) => startDrag(e, entry, false)}
+                  onclick={(e) => e.stopPropagation()}
+                >
+                  <img src={prepared.get(entry.imageId!)?.url} alt="" draggable="false" />
+                  {#if mode === 'images'}
+                    <span class="tag">{t('image.addedBadge')}</span>
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <span class="handle" title={t('image.resize')} onpointerdown={(e) => startDrag(e, entry, true)}></span>
+                  {/if}
+                </div>
+              {/each}
             </div>
           {:else}
             <div class="sheet placeholder" style:aspect-ratio="1 / {pdf.firstAspect}"></div>
@@ -465,7 +744,23 @@
       </div>
 
       <aside class="panel-col">
-        {#if draft}
+        {#if mode === 'images' && selImage && view && info && (selInfo || selEntry?.kind === 'imgAdd')}
+          <ImagePanel
+            image={selInfo}
+            state={selEntry?.kind === 'imgAdd' ? 'added' : selEntry?.kind === 'imgDelete' ? 'deleted' : selEntry?.kind === 'imgReplace' ? 'replaced' : 'original'}
+            fit={selEntry?.fit ?? 'contain'}
+            addedUrl={selEntry?.imageId ? prepared.get(selEntry.imageId)?.url : undefined}
+            pageUrl={view.url}
+            pageWidth={info.width}
+            pageHeight={info.height}
+            busy={preparingImage}
+            onreplace={() => chooseImage('replace')}
+            ondelete={deleteImage}
+            onrestore={restoreImage}
+            onfit={setFit}
+            onclose={() => (selImage = null)}
+          />
+        {:else if mode === 'text' && draft}
           <div class="panel card" role="dialog" aria-labelledby="edit-panel-title">
             <div class="panel-head">
               <h3 id="edit-panel-title">{draft.entry.kind === 'add' ? t('edit.panelTitleNew') : t('edit.panelTitle')}</h3>
@@ -541,12 +836,20 @@
         {:else}
           <div class="how">
             <p class="how-title"><Icon name="info" size={16} />{t('edit.howTitle')}</p>
-            <ul>
-              <li>{t('edit.how1')}</li>
-              <li>{t('edit.how2')}</li>
-              <li>{t('edit.how3')}</li>
-              <li>{t('edit.how4')}</li>
-            </ul>
+            {#if mode === 'text'}
+              <ul>
+                <li>{t('edit.how1')}</li>
+                <li>{t('edit.how2')}</li>
+                <li>{t('edit.how3')}</li>
+                <li>{t('edit.how4')}</li>
+              </ul>
+            {:else}
+              <ul>
+                <li>{t('image.how1')}</li>
+                <li>{t('image.how2')}</li>
+                <li>{t('image.how3')}</li>
+              </ul>
+            {/if}
           </div>
         {/if}
       </aside>
@@ -578,6 +881,90 @@
 <ResultDialog {result} onclose={() => (result = null)} onnew={() => { result = null; reset(); }} />
 
 <style>
+  .mode {
+    display: flex;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r);
+    overflow: hidden;
+  }
+  .mode button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 0;
+    background: var(--surface);
+    padding: 6px 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  .mode button + button {
+    border-left: 1px solid var(--line);
+  }
+  .mode button.on {
+    background: var(--coral);
+    color: var(--on-coral);
+  }
+  .imgbox {
+    position: absolute;
+    padding: 0;
+    border: 2px dashed color-mix(in srgb, var(--violet) 45%, transparent);
+    border-radius: 2px;
+    background: transparent;
+    cursor: pointer;
+  }
+  .imgbox:hover,
+  .imgbox:focus-visible {
+    border-color: var(--violet);
+    background: color-mix(in srgb, var(--violet) 8%, transparent);
+  }
+  .imgbox.replaced {
+    border: 2px solid color-mix(in srgb, var(--coral) 80%, transparent);
+  }
+  .imgbox.deleted {
+    border: 2px solid var(--danger);
+    background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--danger) 12%, transparent) 0 8px, transparent 8px 16px);
+  }
+  .imgbox.selected {
+    border: 2px solid var(--violet);
+    background: color-mix(in srgb, var(--violet) 10%, transparent);
+  }
+  .tag.del {
+    background: var(--danger);
+  }
+  .added-img {
+    position: absolute;
+    outline: 2px solid color-mix(in srgb, var(--coral) 80%, transparent);
+    cursor: move;
+    touch-action: none;
+  }
+  .added-img.selected {
+    outline: 2px solid var(--violet);
+  }
+  .added-img.inert {
+    pointer-events: none;
+    outline: none;
+  }
+  .added-img img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    pointer-events: none;
+  }
+  .handle {
+    position: absolute;
+    right: -9px;
+    bottom: -9px;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: var(--violet);
+    border: 2px solid #fff;
+    cursor: nwse-resize;
+    touch-action: none;
+  }
   .section {
     padding: 20px;
   }
@@ -1019,7 +1406,7 @@
       width: 64px;
     }
     /* Su telefono il pannello sale dal basso, sopra la barra delle azioni. */
-    .panel-col:has(.panel) {
+    .panel-col:has(:global(.panel)) {
       position: fixed;
       top: auto;
       left: 0;

@@ -15,6 +15,9 @@ window.addEventListener('hashchange', () => {
   window.scrollTo({ top: 0 });
 });
 
+/** Modalità dello strumento di modifica: testo o immagini. */
+export const editMode = $state<{ mode: 'text' | 'images' }>({ mode: 'text' });
+
 export function navigate(route: Route) {
   location.hash = route === 'home' ? '' : `/${route}`;
 }

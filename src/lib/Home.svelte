@@ -3,13 +3,13 @@
   import Icon from './components/Icon.svelte';
   import type { IconName } from './components/icons';
   import { t, type MessageKey } from './i18n.svelte';
-  import type { Route } from './state.svelte';
+  import { editMode, type Route } from './state.svelte';
 
-  const tools: { route?: Route; icon: IconName; title: MessageKey; desc: MessageKey; tone: string }[] = [
+  const tools: { route?: Route; mode?: 'text' | 'images'; icon: IconName; title: MessageKey; desc: MessageKey; tone: string }[] = [
     { route: 'extract', icon: 'scissors', title: 'tool.extract.title', desc: 'tool.extract.desc', tone: 'coral' },
     { route: 'merge', icon: 'files', title: 'tool.merge.title', desc: 'tool.merge.desc', tone: 'violet' },
-    { route: 'edit', icon: 'pencil', title: 'tool.edit.title', desc: 'tool.edit.desc', tone: 'sun' },
-    { icon: 'photo', title: 'tool.images.title', desc: 'tool.images.desc', tone: 'mint' },
+    { route: 'edit', mode: 'text', icon: 'pencil', title: 'tool.edit.title', desc: 'tool.edit.desc', tone: 'sun' },
+    { route: 'edit', mode: 'images', icon: 'photo', title: 'tool.images.title', desc: 'tool.images.desc', tone: 'mint' },
   ];
 </script>
 
@@ -26,7 +26,7 @@
 <div class="tools">
   {#each tools as tool}
     {#if tool.route}
-      <a class="tool card {tool.tone}" href="#/{tool.route}">
+      <a class="tool card {tool.tone}" href="#/{tool.route}" onclick={() => tool.mode && (editMode.mode = tool.mode)}>
         <span class="ico"><Icon name={tool.icon} size={24} /></span>
         <h3>{t(tool.title)}</h3>
         <p>{t(tool.desc)}</p>

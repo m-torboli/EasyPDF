@@ -1,6 +1,5 @@
 // Interfaccia a promesse verso il Web Worker PDF.
-import type { ErrorCode, OpenResult, PickMsg, RenderEditedResult, RenderResult, Request, Response } from './protocol';
-import type { PageTextInfo, TextEdit } from './textEdit';
+import type { ErrorCode, OpenResult, PageEdits, PageInfo, PickMsg, RenderEditedResult, RenderResult, Request, Response } from './protocol';
 
 export class PdfClientError extends Error {
   code: ErrorCode;
@@ -94,16 +93,23 @@ export function build(parts: { fileId: string; pages: PickMsg[] }[]): Promise<Ui
 // Gli oggetti di stato dell'interfaccia vanno copiati in dati semplici prima di passare al worker.
 const plain = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 
-export function pageText(fileId: string, index: number): Promise<PageTextInfo> {
-  return call<PageTextInfo>({ type: 'pageText', fileId, index });
+/** Paragrafi e immagini modificabili di una pagina. */
+export function pageInfo(fileId: string, index: number): Promise<PageInfo> {
+  return call<PageInfo>({ type: 'pageText', fileId, index });
+}
+
+/** Consegna al motore un'immagine scelta dall'utente, da usare nelle modifiche. */
+export function putImage(imageId: string, bytes: ArrayBuffer, width: number, height: number): Promise<void> {
+  const copy = bytes.slice(0);
+  return call<void>({ type: 'putImage', imageId, bytes: copy, width, height }, [copy]);
 }
 
 /** Rende una pagina con le modifiche al testo applicate (anteprima fedele al risultato). */
-export async function renderEdited(fileId: string, index: number, width: number, edits: TextEdit[]) {
+export async function renderEdited(fileId: string, index: number, width: number, edits: PageEdits) {
   const r = await call<RenderEditedResult>({ type: 'renderEdited', fileId, index, width, edits: plain(edits) });
   return { url: URL.createObjectURL(new Blob([r.png as BlobPart], { type: 'image/png' })), width: r.width, height: r.height, reports: r.reports };
 }
 
-export function buildEdited(fileId: string, pages: { index: number; edits: TextEdit[] }[]): Promise<Uint8Array> {
+export function buildEdited(fileId: string, pages: { index: number; edits: PageEdits }[]): Promise<Uint8Array> {
   return call<Uint8Array>({ type: 'buildEdited', fileId, pages: plain(pages) });
 }

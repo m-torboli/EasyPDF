@@ -5,10 +5,10 @@
   import Icon from './Icon.svelte';
   import type { IconName } from './icons';
 
-  const tabs: { route: Route; icon: IconName; key: 'tool.extract.title' | 'tool.merge.title' | 'tool.edit.title' }[] = [
+  const tabs: { route: Route; icon: IconName; key: 'tool.extract.title' | 'tool.merge.title' | 'tool.edit.tab' }[] = [
     { route: 'extract', icon: 'scissors', key: 'tool.extract.title' },
     { route: 'merge', icon: 'files', key: 'tool.merge.title' },
-    { route: 'edit', icon: 'pencil', key: 'tool.edit.title' },
+    { route: 'edit', icon: 'pencil', key: 'tool.edit.tab' },
   ];
 </script>
 
