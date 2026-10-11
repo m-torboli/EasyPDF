@@ -16,7 +16,7 @@ EasyPDF è un'app per gestire i PDF che funziona su Mac, iPhone, iPad, Windows e
 
 ### Cosa fa
 
-- **Estrai pagine**: scegli le pagine toccando le miniature oppure scrivendole (`1-3, 5, 8-10`, `8-` = dalla 8 alla fine). Puoi anche ruotarle e riordinarle trascinandole.
+- **Estrai pagine**: scegli le pagine toccando le miniature oppure scrivendole (`1-3, 5, 8-10`, `8-` = dalla 8 alla fine). Puoi vederle in grande (lente, doppio clic o barra spaziatrice), selezionarne tante insieme trascinando un rettangolo, ruotarle e riordinarle trascinandole.
 - **Unisci PDF**: metti insieme più PDF nell'ordine che vuoi, scegliendo eventualmente solo alcune pagine di ciascuno.
 - PDF protetti da password: EasyPDF chiede la password e la usa solo sul tuo dispositivo.
 - **Modifica testo**: tocca un paragrafo e riscrivilo, oppure aggiungi testo nuovo. Il testo vecchio viene rimosso davvero (non coperto), con posizione, dimensione e colore originali e un carattere simile; se il testo nuovo è più lungo, usa lo spazio libero vicino e, se serve, si rimpicciolisce un po'. Anteprima immediata del risultato.
@@ -37,7 +37,7 @@ EasyPDF is a PDF app for Mac, iPhone, iPad, Windows and Android. Open it from a 
 
 **Your files never leave your device.** Everything is processed locally in the browser: no PDF is ever uploaded. The original is never changed: EasyPDF always creates a new file.
 
-- **Extract pages**: pick pages by tapping thumbnails or typing them (`1-3, 5, 8-10`, `8-` = from 8 to the end). Rotate and reorder them by dragging.
+- **Extract pages**: pick pages by tapping thumbnails or typing them (`1-3, 5, 8-10`, `8-` = from 8 to the end). See them full size (magnifier, double-click or space bar), select many at once by dragging a rectangle, rotate them and reorder them by dragging.
 - **Merge PDFs**: combine several PDFs in any order, optionally picking only some pages of each.
 - **Edit text**: tap a paragraph and rewrite it, or add new text. The old text is truly removed (not covered), keeping position, size and colour with a similar font; longer text uses nearby free space and shrinks slightly if needed. Live preview of the real result.
 - **Images**: tap an image to replace it (keeping proportions or filling the space) or delete it; add new ones and move or resize them by touch or mouse. Only the chosen image changes: the rest of the page, including what lies under or over it, stays as it is.

@@ -5,8 +5,9 @@
     open,
     onclose,
     labelledby,
+    wide = false,
     children,
-  }: { open: boolean; onclose: () => void; labelledby: string; children: Snippet } = $props();
+  }: { open: boolean; onclose: () => void; labelledby: string; wide?: boolean; children: Snippet } = $props();
 
   let dialog: HTMLDialogElement;
 
@@ -18,6 +19,7 @@
 
 <dialog
   bind:this={dialog}
+  class:wide
   aria-labelledby={labelledby}
   oncancel={(e) => {
     e.preventDefault();
@@ -44,6 +46,10 @@
     background: var(--surface);
     color: var(--ink);
     box-shadow: var(--shadow-lift);
+  }
+  dialog.wide {
+    width: min(1040px, calc(100vw - 24px));
+    max-height: calc(100dvh - 24px);
   }
   dialog::backdrop {
     background: rgb(28 26 46 / 0.45);

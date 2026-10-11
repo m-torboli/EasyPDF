@@ -54,6 +54,8 @@ export const icons = {
   refresh: ['M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4', 'M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4'],
   squareCheck: ['M3 5a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14z', 'M9 12l2 2l4 -4'],
   square: ['M3 5a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14z'],
+  zoomIn: [circle(10, 10, 7), 'M7 10l6 0', 'M10 7l0 6', 'M21 21l-6 -6'],
+  arrowRight: ['M5 12h14', 'M13 18l6 -6', 'M13 6l6 6'],
   install: ['M12 3v11', 'M8 10l4 4l4 -4', 'M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2'],
 } satisfies Record<string, string[]>;
 

@@ -3,6 +3,7 @@
   import DropZone from '../components/DropZone.svelte';
   import FileBar from '../components/FileBar.svelte';
   import Icon from '../components/Icon.svelte';
+  import PagePreview from '../components/PagePreview.svelte';
   import ResultDialog from '../components/ResultDialog.svelte';
   import StepTitle from '../components/StepTitle.svelte';
   import Thumb from '../components/Thumb.svelte';
@@ -24,6 +25,12 @@
   let showValidation = $state(false);
   let lastClicked: number | null = null;
   let result = $state<BuiltPdf | null>(null);
+  let previewIndex = $state<number | null>(null);
+
+  // Selezione a rettangolo (mouse e trackpad): coordinate relative all'area delle miniature.
+  let zone = $state<HTMLDivElement>();
+  let marquee = $state<{ left: number; top: number; width: number; height: number; remove: boolean } | null>(null);
+  const hits = new SvelteSet<number>();
 
   const picks = $derived(order.filter((i) => selected.has(i)).map((i) => ({ index: i, rotate: rotations[i] })));
   const orderChanged = $derived(order.some((v, i) => v !== i));
@@ -93,6 +100,90 @@
     }
     lastClicked = index;
     syncText();
+  }
+
+  function togglePage(index: number) {
+    if (selected.has(index)) selected.delete(index);
+    else selected.add(index);
+    lastClicked = index;
+    syncText();
+  }
+
+  function closePreview() {
+    const index = previewIndex;
+    previewIndex = null;
+    // Il focus torna sulla miniatura da cui si era partiti.
+    if (index !== null) zone?.querySelector<HTMLElement>(`li[data-index="${index}"] .select`)?.focus();
+  }
+
+  function startMarquee(ev: PointerEvent) {
+    // Solo mouse e trackpad: col dito trascinare serve a scorrere la pagina.
+    if (ev.pointerType === 'touch' || ev.button !== 0 || !zone) return;
+    if ((ev.target as HTMLElement).closest('.page, button, input, a')) return;
+    ev.preventDefault();
+
+    const doc = (x: number, y: number) => [x + window.scrollX, y + window.scrollY] as const;
+    const zr = zone.getBoundingClientRect();
+    const [zoneX, zoneY] = doc(zr.left, zr.top);
+    const [startX, startY] = doc(ev.clientX, ev.clientY);
+    const items = [...zone.querySelectorAll<HTMLElement>('li[data-index]')].map((el) => {
+      const r = el.getBoundingClientRect();
+      const [x0, y0] = doc(r.left, r.top);
+      return { index: Number(el.dataset.index), x0, y0, x1: x0 + r.width, y1: y0 + r.height };
+    });
+    let client = { x: ev.clientX, y: ev.clientY };
+    let remove = ev.altKey;
+    let moved = false;
+    let frame = 0;
+
+    const update = () => {
+      const [cx, cy] = doc(client.x, client.y);
+      if (!moved && Math.hypot(cx - startX, cy - startY) < 5) return;
+      moved = true;
+      const x0 = Math.min(startX, cx);
+      const y0 = Math.min(startY, cy);
+      const x1 = Math.max(startX, cx);
+      const y1 = Math.max(startY, cy);
+      hits.clear();
+      for (const it of items) if (it.x0 < x1 && it.x1 > x0 && it.y0 < y1 && it.y1 > y0) hits.add(it.index);
+      marquee = { left: x0 - zoneX, top: y0 - zoneY, width: x1 - x0, height: y1 - y0, remove };
+    };
+    // Vicino ai bordi della finestra la pagina scorre da sola, per selezionare anche ciò che non si vede.
+    const autoscroll = () => {
+      const edge = 70;
+      const bottom = window.innerHeight - 120; // sopra la barra delle azioni
+      const dy = client.y < edge ? -(edge - client.y) / 3 : client.y > bottom ? (client.y - bottom) / 3 : 0;
+      if (dy && moved) {
+        window.scrollBy(0, Math.max(-25, Math.min(25, dy)));
+        update();
+      }
+      frame = requestAnimationFrame(autoscroll);
+    };
+    const move = (e: PointerEvent) => {
+      client = { x: e.clientX, y: e.clientY };
+      remove = e.altKey;
+      update();
+    };
+    const end = () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+      if (moved) {
+        for (const i of hits) {
+          if (remove) selected.delete(i);
+          else selected.add(i);
+        }
+        lastClicked = null;
+        syncText();
+      }
+      hits.clear();
+      marquee = null;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+    frame = requestAnimationFrame(autoscroll);
   }
 
   function onRangeInput() {
@@ -196,7 +287,10 @@
     </div>
 
     <div class="grid-head">
-      <p class="hint"><Icon name="info" size={15} />{t('extract.clickHint')}</p>
+      <div class="hints">
+        <p class="hint"><Icon name="info" size={15} />{t('extract.clickHint')}</p>
+        <p class="hint desktop-only"><Icon name="zoomIn" size={15} />{t('extract.marqueeHint')}</p>
+      </div>
       <div class="grid-tools">
         {#if selected.size > 0}
           <button class="btn btn-ghost btn-sm" onclick={() => rotateSelected(-90)} title={t('extract.rotateLeft')}>
@@ -217,19 +311,31 @@
       <p class="msg msg-info order-note"><Icon name="info" size={16} />{t('extract.orderChanged')}</p>
     {/if}
 
-    <ul class="grid" use:sortable={{ onSort: (from, to) => (order = moveItem(order, from, to)), filter: '.tools' }}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="zone" class:dragging={marquee !== null} bind:this={zone} onpointerdown={startMarquee}>
+    <ul class="grid" use:sortable={{ onSort: (from, to) => (order = moveItem(order, from, to)), filter: '.tools, .zoom' }}>
       {#each order as index (index)}
         {@const isSel = selected.has(index)}
-        <li class="page" class:selected={isSel}>
+        <li class="page" class:selected={isSel} class:hit={hits.has(index) && !marquee?.remove} class:hit-remove={hits.has(index) && marquee?.remove} data-index={index}>
           <button
             type="button"
             class="select"
             aria-pressed={isSel}
             aria-label={t('extract.selectPage', { n: index + 1 })}
             onclick={(e) => toggle(index, e)}
+            ondblclick={() => (previewIndex = index)}
+            onkeydown={(e) => {
+              if (e.key === ' ') {
+                e.preventDefault();
+                previewIndex = index;
+              }
+            }}
           >
             <Thumb fileId={pdf.id} {index} width={150} rotation={rotations[index]} aspect={pdf.firstAspect} />
             <span class="check" aria-hidden="true"><Icon name="check" size={13} stroke={3} /></span>
+          </button>
+          <button type="button" class="zoom" onclick={() => (previewIndex = index)} aria-label={t('preview.open', { n: index + 1 })} title={t('preview.open', { n: index + 1 })}>
+            <Icon name="zoomIn" size={16} />
           </button>
           <div class="tools">
             <button type="button" class="tool" onclick={() => rotate(index, -90)} aria-label="{t('extract.rotateLeft')} · {t('extract.pageLabel', { n: index + 1 })}" title={t('extract.rotateLeft')}>
@@ -243,7 +349,22 @@
         </li>
       {/each}
     </ul>
+    {#if marquee}
+      <div class="marquee" class:remove={marquee.remove} style:left="{marquee.left}px" style:top="{marquee.top}px" style:width="{marquee.width}px" style:height="{marquee.height}px"></div>
+    {/if}
+    </div>
   </section>
+
+  <PagePreview
+    fileId={pdf.id}
+    {order}
+    current={previewIndex}
+    {rotations}
+    {selected}
+    ontoggle={togglePage}
+    onnavigate={(i) => (previewIndex = i)}
+    onclose={closePreview}
+  />
 
   <div class="actionbar-space"></div>
   <div class="actionbar">
@@ -331,6 +452,80 @@
     display: flex;
     gap: 4px;
     flex-wrap: wrap;
+  }
+  .hints {
+    display: grid;
+    gap: 4px;
+  }
+  .desktop-only {
+    display: none;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .desktop-only {
+      display: flex;
+    }
+  }
+  .zone {
+    position: relative;
+    margin: -10px;
+    padding: 10px;
+  }
+  .zone.dragging {
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: crosshair;
+  }
+  .marquee {
+    position: absolute;
+    z-index: 5;
+    border: 1.5px solid var(--violet);
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--violet) 12%, transparent);
+    pointer-events: none;
+  }
+  .marquee.remove {
+    border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+  .page.hit {
+    box-shadow: 0 0 0 2px var(--violet);
+  }
+  .page.hit-remove {
+    box-shadow: 0 0 0 2px var(--danger);
+    opacity: 0.75;
+  }
+  .zoom {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    color: var(--ink-2);
+    cursor: zoom-in;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .page:hover .zoom,
+  .zoom:focus-visible {
+    opacity: 1;
+  }
+  .zoom:hover {
+    color: var(--violet);
+    border-color: var(--violet);
+  }
+  @media (hover: none) {
+    .zoom {
+      opacity: 1;
+      top: 4px;
+      left: 4px;
+      width: 26px;
+      height: 26px;
+    }
   }
   .order-note {
     margin-bottom: 10px;
