@@ -1,7 +1,7 @@
 import * as mupdf from 'mupdf';
 import { describe, expect, it } from 'vitest';
 import { openPdf } from './engine';
-import { applyTextEdits, getPageText, standardFontName, wrapText, type TextBlockInfo, type TextEdit } from './textEdit';
+import { applyTextEdits, getPageText, layoutRuns, standardFontName, type TextBlockInfo, type TextEdit, type TextRun } from './textEdit';
 
 // Pagina di prova: titolo Helvetica-Bold rosso, paragrafo Times di 3 righe, data a destra.
 // Il contenuto lascia apposta una trasformazione aperta (q senza Q).
@@ -73,9 +73,21 @@ describe('getPageText', () => {
     expect(after).toContain('Firma del fornitore');
   });
 
-  it('segnala gli stili misti nello stesso paragrafo', () => {
-    const info = getPageText(openPdf(samplePdf({ mixed: true })), 0);
-    expect(info.blocks[1].mixed).toBe(true);
+  it('riconosce una parola in grassetto dentro un paragrafo normale', () => {
+    const para = getPageText(openPdf(samplePdf({ mixed: true })), 0).blocks[1];
+    expect(para.style.bold).toBe(false);
+    expect(para.runs.filter((r) => r.bold).map((r) => r.text.trim())).toEqual(['Bianchi']);
+    expect(para.runs.map((r) => r.text).join('')).toBe(para.text);
+    // Grassetto e corsivo si conservano: non è uno stile "misto" da segnalare.
+    expect(para.mixed).toBe(false);
+  });
+
+  it('segnala come misti caratteri di dimensione diversa nello stesso paragrafo', () => {
+    const doc = new mupdf.PDFDocument();
+    const res = doc.addObject({ Font: { T: doc.addSimpleFont(new mupdf.Font('Times-Roman')) } });
+    doc.insertPage(-1, doc.addPage([0, 0, 595, 842], 0, res, 'BT /T 12 Tf 72 700 Td (Testo normale e ) Tj /T 18 Tf (grande) Tj ET'));
+    const info = getPageText(openPdf(doc.saveToBuffer('').asUint8Array().slice()), 0);
+    expect(info.blocks[0].mixed).toBe(true);
   });
 
   it('riconosce le pagine scansionate', () => {
@@ -92,6 +104,34 @@ describe('getPageText', () => {
 });
 
 describe('applyTextEdits', () => {
+  it('mette in grassetto una sola parola del paragrafo', () => {
+    const doc = openPdf(samplePdf());
+    const [, para] = getPageText(doc, 0).blocks;
+    const runs: TextRun[] = [
+      { text: 'Il contratto riguarda ', bold: false, italic: false },
+      { text: 'cento', bold: true, italic: false },
+      { text: ' sedie e un tavolo ', bold: false, italic: false },
+      { text: 'in noce', bold: false, italic: true },
+      { text: '.', bold: false, italic: false },
+    ];
+    applyTextEdits(doc, 0, [{ ...replaceEdit(para, runs.map((r) => r.text).join('')), runs }]);
+    const saved = openPdf(doc.saveToBuffer('garbage=compact,compress').asUint8Array().slice());
+    const edited = getPageText(saved, 0).blocks.find((b) => b.text.startsWith('Il contratto riguarda'))!;
+    expect(edited.text).toBe('Il contratto riguarda cento sedie e un tavolo in noce.');
+    expect(edited.runs.filter((r) => r.bold).map((r) => r.text.trim())).toEqual(['cento']);
+    expect(edited.runs.filter((r) => r.italic).map((r) => r.text.trim())).toEqual(['in noce']);
+    expect(edited.style.bold).toBe(false);
+  });
+
+  it('modificando un paragrafo conserva le parole già in grassetto', () => {
+    const doc = openPdf(samplePdf({ mixed: true }));
+    const para = getPageText(doc, 0).blocks[1];
+    const runs = para.runs.map((r) => ({ ...r, text: r.text.replace('cento', 'duecento') }));
+    applyTextEdits(doc, 0, [{ ...replaceEdit(para, runs.map((r) => r.text).join('')), runs }]);
+    const edited = getPageText(doc, 0).blocks.find((b) => b.text.includes('duecento'))!;
+    expect(edited.runs.filter((r) => r.bold).map((r) => r.text.trim())).toEqual(['Bianchi']);
+  });
+
   it('sostituisce davvero il testo, lasciando intatti gli altri paragrafi', () => {
     const doc = openPdf(samplePdf());
     const [, para] = getPageText(doc, 0).blocks;
@@ -213,10 +253,16 @@ describe('utilità', () => {
     expect(standardFontName({ family: 'mono', bold: false, italic: true })).toBe('Courier-Oblique');
   });
 
+  it('misura le parole in grassetto con il carattere grassetto', () => {
+    const plain = layoutRuns([{ text: 'Contratto', bold: false, italic: false }], 'sans', 12, 1000)[0].width;
+    const bold = layoutRuns([{ text: 'Contratto', bold: true, italic: false }], 'sans', 12, 1000)[0].width;
+    expect(bold).toBeGreaterThan(plain);
+  });
+
   it('va a capo rispettando larghezza e a capo voluti', () => {
-    const font = new mupdf.Font('Helvetica');
-    const lines = wrapText(font, 'uno due tre quattro cinque\nsei', 10, 60);
+    const lines = layoutRuns([{ text: 'uno due tre quattro cinque\nsei', bold: false, italic: false }], 'sans', 10, 60);
     expect(lines.length).toBeGreaterThan(2);
     for (const l of lines) expect(l.width * 10).toBeLessThanOrEqual(60);
+    expect(lines.at(-1)!.glyphs.map((g) => g.ch).join('')).toBe('sei');
   });
 });

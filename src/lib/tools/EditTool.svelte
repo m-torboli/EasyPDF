@@ -5,6 +5,7 @@
   import FileBar from '../components/FileBar.svelte';
   import Icon from '../components/Icon.svelte';
   import ImagePanel from '../components/ImagePanel.svelte';
+  import RichTextEditor from '../components/RichTextEditor.svelte';
   import ResultDialog from '../components/ResultDialog.svelte';
   import StepTitle from '../components/StepTitle.svelte';
   import Thumb from '../components/Thumb.svelte';
@@ -14,6 +15,7 @@
   import { buildEdited, pageInfo, renderEdited, thumbnail } from '../pdf/client';
   import type { ImageEdit, ImageInfo, Rect } from '../pdf/imageEdit';
   import type { PageEdits, PageInfo } from '../pdf/protocol';
+  import { runsText, type TextRun } from '../pdf/runs';
   import type { EditReport, FontFamily, TextBlockInfo, TextEdit, TextStyle } from '../pdf/textEdit';
   import { editMode, notify } from '../state.svelte';
 
@@ -22,6 +24,8 @@
     kind: 'replace' | 'add';
     blockId?: number;
     text: string;
+    /** Grassetto e corsivo parola per parola. */
+    runs: TextRun[];
     style: TextStyle;
     sizeLocked: boolean;
     x?: number;
@@ -79,7 +83,8 @@
   let rendering = $state(false);
   let renderSeq = 0;
   let stageWidth = $state(600);
-  let textarea = $state<HTMLTextAreaElement>();
+  let editor = $state<RichTextEditor>();
+  let editorState = $state({ bold: false, italic: false });
   let sheetEl = $state<HTMLDivElement>();
 
   const info = $derived(infos.get(pageIndex) ?? null);
@@ -162,11 +167,11 @@
       if (isText(e)) {
         if (e.kind === 'add') {
           if (e.text.trim() === '') continue;
-          text.push({ kind: 'add', x: e.x!, y: e.y!, width: e.width!, text: e.text, style: e.style });
+          text.push({ kind: 'add', x: e.x!, y: e.y!, width: e.width!, text: e.text, runs: e.runs, style: e.style });
         } else {
           const block = page.blocks[e.blockId!];
           if (!block) continue;
-          text.push({ kind: 'replace', block, text: e.text, style: e.style, sizeLocked: e.sizeLocked });
+          text.push({ kind: 'replace', block, text: e.text, runs: e.runs, style: e.style, sizeLocked: e.sizeLocked });
         }
         textKeys.push(e.key);
       } else if (e.kind === 'imgAdd') {
@@ -250,7 +255,15 @@
       isNew: !existing,
       entry: existing
         ? structuredClone($state.snapshot(existing))
-        : { key: `b${block.id}`, kind: 'replace', blockId: block.id, text: block.text, style: { ...block.style }, sizeLocked: false },
+        : {
+            key: `b${block.id}`,
+            kind: 'replace',
+            blockId: block.id,
+            text: block.text,
+            runs: block.runs.map((r) => ({ ...r })),
+            style: { ...block.style },
+            sizeLocked: false,
+          },
     };
     focusTextarea();
   }
@@ -284,6 +297,7 @@
         key: `a${++addCounter}`,
         kind: 'add',
         text: '',
+        runs: [],
         style: { family: 'sans', bold: false, italic: false, size: 12, color: [0, 0, 0] },
         sizeLocked: true,
         x,
@@ -297,7 +311,7 @@
   async function focusTextarea() {
     await tick();
     const phone = window.innerWidth <= 700;
-    textarea?.focus({ preventScroll: phone });
+    editor?.focus(phone);
     if (phone) {
       // Il pannello occupa la metà bassa dello schermo: il paragrafo va portato in alto.
       const box = document.querySelector('.tool:not([hidden]) .box.selected');
@@ -308,7 +322,13 @@
   function isNoop(e: TextEntry): boolean {
     if (e.kind === 'add') return e.text.trim() === '';
     const block = infos.get(draft?.page ?? pageIndex)?.blocks[e.blockId!];
-    return !!block && e.text === block.text && !e.sizeLocked && JSON.stringify(e.style) === JSON.stringify(block.style);
+    return (
+      !!block &&
+      e.text === block.text &&
+      JSON.stringify(e.runs) === JSON.stringify(block.runs) &&
+      !e.sizeLocked &&
+      JSON.stringify(e.style) === JSON.stringify(block.style)
+    );
   }
 
   function setEntry(page: number, key: string, entry: Entry | null) {
@@ -352,7 +372,7 @@
     if (entry.kind === 'add') {
       if (edits[page]?.[entry.key]) setEntry(page, entry.key, null);
     } else {
-      setEntry(page, entry.key, { ...($state.snapshot(entry) as TextEntry), text: '' });
+      setEntry(page, entry.key, { ...($state.snapshot(entry) as TextEntry), text: '', runs: [] });
     }
     draft = null;
     scheduleRender(0);
@@ -379,6 +399,18 @@
     draft.entry.style.size = Math.max(4, Math.min(96, Math.round((draft.entry.style.size + delta) * 2) / 2));
     draft.entry.sizeLocked = true;
     scheduleRender(150);
+  }
+
+  function onRuns(runs: TextRun[]) {
+    if (!draft) return;
+    draft.entry.runs = runs;
+    draft.entry.text = runsText(runs);
+    scheduleRender();
+  }
+
+  function toggleStyle(kind: 'bold' | 'italic') {
+    editor?.toggle(kind);
+    scheduleRender(0);
   }
 
   function setFamily(f: FontFamily) {
@@ -766,23 +798,19 @@
               <h3 id="edit-panel-title">{draft.entry.kind === 'add' ? t('edit.panelTitleNew') : t('edit.panelTitle')}</h3>
               <button class="icon-btn" onclick={cancelDraft} aria-label={t('edit.close')}><Icon name="x" size={18} /></button>
             </div>
-            <textarea
-              bind:this={textarea}
-              bind:value={draft.entry.text}
-              oninput={() => scheduleRender()}
-              onkeydown={(e) => {
-                if (e.key === 'Escape') cancelDraft();
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commitDraft();
-              }}
-              rows="5"
-              placeholder={draft.entry.kind === 'add' ? t('edit.placeholderNew') : ''}
-              class="input editor-text"
-              class:serif={draft.entry.style.family === 'serif'}
-              class:mono={draft.entry.style.family === 'mono'}
-              style:font-weight={draft.entry.style.bold ? 700 : 400}
-              style:font-style={draft.entry.style.italic ? 'italic' : 'normal'}
-              spellcheck="true"
-            ></textarea>
+            {#key draft.entry.key}
+              <RichTextEditor
+                bind:this={editor}
+                runs={draft.entry.runs}
+                family={draft.entry.style.family}
+                placeholder={draft.entry.kind === 'add' ? t('edit.placeholderNew') : ''}
+                label={draft.entry.kind === 'add' ? t('edit.panelTitleNew') : t('edit.panelTitle')}
+                onchange={onRuns}
+                onstate={(st) => (editorState = st)}
+                oncommit={commitDraft}
+                oncancel={cancelDraft}
+              />
+            {/key}
 
             <p class="small-label">{t('edit.appearance')}</p>
             <div class="seg" role="group" aria-label={t('edit.appearance')}>
@@ -793,8 +821,9 @@
               {/each}
             </div>
             <div class="row">
-              <button class="toggle" class:on={draft.entry.style.bold} aria-pressed={draft.entry.style.bold} onclick={() => { draft!.entry.style.bold = !draft!.entry.style.bold; scheduleRender(0); }} title={t('edit.bold')} aria-label={t('edit.bold')}><b>{t('edit.boldShort')}</b></button>
-              <button class="toggle" class:on={draft.entry.style.italic} aria-pressed={draft.entry.style.italic} onclick={() => { draft!.entry.style.italic = !draft!.entry.style.italic; scheduleRender(0); }} title={t('edit.italic')} aria-label={t('edit.italic')}><i>{t('edit.italicShort')}</i></button>
+              <!-- onmousedown: il clic non deve far perdere la selezione nel testo -->
+              <button class="toggle" class:on={editorState.bold} aria-pressed={editorState.bold} onpointerdown={(e) => e.preventDefault()} onmousedown={(e) => e.preventDefault()} onclick={() => toggleStyle('bold')} title={t('edit.boldTitle')} aria-label={t('edit.bold')}><b>{t('edit.boldShort')}</b></button>
+              <button class="toggle" class:on={editorState.italic} aria-pressed={editorState.italic} onpointerdown={(e) => e.preventDefault()} onmousedown={(e) => e.preventDefault()} onclick={() => toggleStyle('italic')} title={t('edit.italicTitle')} aria-label={t('edit.italic')}><i>{t('edit.italicShort')}</i></button>
               <span class="swatch" style:background={colorName(draft.entry.style.color)} aria-hidden="true"></span>
               <div class="size" role="group" aria-label={t('edit.size')}>
                 <button onclick={() => changeSize(-0.5)} aria-label={t('edit.smaller')}>−</button>
@@ -802,6 +831,7 @@
                 <button onclick={() => changeSize(0.5)} aria-label={t('edit.larger')}>+</button>
               </div>
             </div>
+            <p class="hint-line">{t('edit.styleHint')}</p>
             {#if draftBlock}
               <p class="hint-line">{t('edit.originalFont', { font: draftBlock.fontName })}</p>
             {/if}

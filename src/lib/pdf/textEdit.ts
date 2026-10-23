@@ -2,7 +2,11 @@
 // Strategia: il testo originale viene rimosso davvero (redazione del solo testo, non delle
 // immagini né della grafica) e il testo nuovo viene scritto con un carattere standard simile,
 // nella stessa posizione, dimensione e colore, andando a capo nella larghezza originale.
+// Grassetto e corsivo possono variare parola per parola all'interno dello stesso paragrafo.
 import * as mupdf from 'mupdf';
+import { normalizeRuns, type TextRun } from './runs';
+
+export { normalizeRuns, type TextRun };
 
 export type Rect = [number, number, number, number];
 export type RGB = [number, number, number];
@@ -30,6 +34,8 @@ export interface TextBlockInfo {
   room: Room;
   lines: Rect[];
   text: string;
+  /** Il testo diviso in porzioni di grassetto e corsivo, come nell'originale. */
+  runs: TextRun[];
   style: TextStyle;
   fontName: string;
   align: Align;
@@ -51,6 +57,8 @@ export type TextEdit =
       kind: 'replace';
       block: Pick<TextBlockInfo, 'bbox' | 'room' | 'lines' | 'align' | 'lineHeight' | 'firstBaseline' | 'style'>;
       text: string;
+      /** Grassetto e corsivo parola per parola; se assente vale lo stile del paragrafo. */
+      runs?: TextRun[];
       style: TextStyle;
       /** true se l'utente ha cambiato la dimensione: niente adattamento automatico. */
       sizeLocked: boolean;
@@ -61,6 +69,7 @@ export type TextEdit =
       y: number;
       width: number;
       text: string;
+      runs?: TextRun[];
       style: TextStyle;
     };
 
@@ -112,6 +121,7 @@ type StyleCounts = Map<string, { count: number; style: TextStyle; name: string }
 interface RawLine {
   bbox: Rect;
   text: string;
+  runs: TextRun[];
   baseline: number;
   styles: StyleCounts;
   lastRight: number;
@@ -159,18 +169,22 @@ export function getPageText(doc: mupdf.PDFDocument, index: number): PageTextInfo
       // Un salto orizzontale ampio sulla stessa riga separa testi distinti
       // (per esempio due firme affiancate o le colonne di una tabella).
       if (!seg || cx0 - seg.lastRight > Math.max(size * 1.8, 12)) {
-        seg = { bbox: [cx0, lineBox[1], cx1, lineBox[3]], text: '', baseline: origin[1], styles: new Map(), lastRight: cx1, pendingSpace: '' };
+        seg = { bbox: [cx0, lineBox[1], cx1, lineBox[3]], text: '', runs: [], baseline: origin[1], styles: new Map(), lastRight: cx1, pendingSpace: '' };
         segments.push(seg);
-      } else {
+      } else if (seg.pendingSpace) {
         seg.text += seg.pendingSpace;
+        seg.runs.at(-1)!.text += seg.pendingSpace;
       }
+      const f = classifyFont(font);
       seg.pendingSpace = '';
       seg.text += c;
+      const lastRun = seg.runs.at(-1);
+      if (lastRun && lastRun.bold === f.bold && lastRun.italic === f.italic) lastRun.text += c;
+      else seg.runs.push({ text: c, bold: f.bold, italic: f.italic });
       seg.lastRight = cx1;
       seg.bbox[0] = Math.min(seg.bbox[0], cx0);
       seg.bbox[2] = Math.max(seg.bbox[2], cx1);
 
-      const f = classifyFont(font);
       const rgb = toRGB(color as number[]).map((v) => round(v, 3)) as RGB;
       const key = `${f.name}|${round(size, 1)}|${rgb.join(',')}`;
       const entry = seg.styles.get(key);
@@ -229,9 +243,11 @@ function makeBlock(lines: RawLine[], id: number): TextBlockInfo {
     }
   }
   const ranked = [...styles.values()].sort((a, b) => b.count - a.count);
-  const total = ranked.reduce((s, r) => s + r.count, 0);
   const main = ranked[0];
-  const mixed = ranked.length > 1 && main.count < total;
+  // Grassetto e corsivo vengono conservati parola per parola; "misto" segnala solo le
+  // differenze che non si possono riprodurre: carattere, dimensione o colore.
+  const kinds = new Set(ranked.map((r) => `${r.style.family}|${r.style.size}|${r.style.color.join(',')}`));
+  const mixed = kinds.size > 1;
 
   const baselines = lines.map((l) => l.baseline);
   const gaps = baselines.slice(1).map((b, i) => b - baselines[i]).filter((g) => g > 0);
@@ -243,6 +259,7 @@ function makeBlock(lines: RawLine[], id: number): TextBlockInfo {
     Math.max(...lines.map((l) => l.bbox[2])),
     Math.max(...lines.map((l) => l.bbox[3])),
   ];
+  const runs = joinRuns(lines, bbox);
   const x0s = lines.map((l) => l.bbox[0]);
   const x1s = lines.map((l) => l.bbox[2]);
   const spread = (xs: number[]) => Math.max(...xs) - Math.min(...xs);
@@ -257,7 +274,8 @@ function makeBlock(lines: RawLine[], id: number): TextBlockInfo {
     bbox: bbox.map((v) => round(v)) as Rect,
     room: { left: 0, right: 0, bottom: 0 },
     lines: lines.map((l) => l.bbox.map((v) => round(v)) as Rect),
-    text: joinLines(lines, bbox),
+    text: runs.map((r) => r.text).join(''),
+    runs,
     style: main.style,
     fontName: main.name,
     align,
@@ -267,24 +285,42 @@ function makeBlock(lines: RawLine[], id: number): TextBlockInfo {
   };
 }
 
+function trimRuns(runs: TextRun[]): TextRun[] {
+  const out = runs.map((r) => ({ ...r }));
+  while (out.length && out[0].text.trimStart() === '') out.shift();
+  while (out.length && out.at(-1)!.text.trimEnd() === '') out.pop();
+  if (out.length) {
+    out[0].text = out[0].text.trimStart();
+    out[out.length - 1].text = out[out.length - 1].text.trimEnd();
+  }
+  return out;
+}
+
 // Unisce le righe di un paragrafo: le righe piene si uniscono con uno spazio (il testo
 // andrà a capo da solo), quelle che finiscono molto prima del margine sono a capo voluti.
-function joinLines(lines: RawLine[], bbox: Rect): string {
+// Lo stile di ogni porzione (grassetto, corsivo) viene mantenuto.
+function joinRuns(lines: RawLine[], bbox: Rect): TextRun[] {
   const width = bbox[2] - bbox[0];
-  let out = '';
+  const out: TextRun[] = [];
+  const text = () => out.map((r) => r.text).join('');
+  const append = (t: string) => {
+    if (out.length) out[out.length - 1].text += t;
+  };
   lines.forEach((l, i) => {
-    const text = l.text.trim();
-    if (i === 0) {
-      out = text;
-      return;
+    const runs = trimRuns(l.runs);
+    if (runs.length === 0) return;
+    if (i > 0 && out.length) {
+      const prevFull = lines[i - 1].bbox[2] - bbox[0] >= width * 0.8;
+      const first = runs[0].text;
+      if (!prevFull) append('\n');
+      else if (/[a-zà-ÿ]-$/i.test(text()) && /^[a-zà-ÿ]/.test(first)) {
+        const last = out[out.length - 1];
+        last.text = last.text.slice(0, -1);
+      } else append(' ');
     }
-    const prev = lines[i - 1];
-    const prevFull = prev.bbox[2] - bbox[0] >= width * 0.8;
-    if (!prevFull) out += '\n' + text;
-    else if (/[a-zà-ÿ]-$/i.test(out) && /^[a-zà-ÿ]/.test(text)) out = out.slice(0, -1) + text;
-    else out += ' ' + text;
+    out.push(...runs);
   });
-  return out;
+  return normalizeRuns(out);
 }
 
 // Calcola fin dove ogni paragrafo può allargarsi senza invadere gli altri: a destra e a
@@ -344,56 +380,93 @@ function loadFont(name: string): mupdf.Font {
 
 // --- Impaginazione -------------------------------------------------------------
 
-interface Glyphed {
-  gids: number[];
-  width: number; // in em
+/** Un carattere pronto da scrivere: carattere tipografico, glifo e larghezza (in em). */
+interface Glyph {
+  ch: string;
+  font: string;
+  gid: number;
+  adv: number;
 }
 
-function glyphs(font: mupdf.Font, text: string, missing: Set<string>): Glyphed {
-  const gids: number[] = [];
-  let width = 0;
-  for (const ch of text) {
-    const gid = font.encodeCharacter(ch.codePointAt(0)!);
-    if (gid <= 0 && ch !== ' ') {
-      missing.add(ch);
-      continue;
+export interface LayoutLine {
+  glyphs: Glyph[];
+  /** Larghezza in em (va moltiplicata per la dimensione del carattere). */
+  width: number;
+}
+
+const lineWidth = (gs: Glyph[]) => gs.reduce((w, g) => w + g.adv, 0);
+
+/** Trasforma le porzioni di testo in glifi, paragrafo per paragrafo (separati dagli a capo). */
+function toGlyphs(runs: TextRun[], family: FontFamily, missing: Set<string>): Glyph[][] {
+  const paragraphs: Glyph[][] = [[]];
+  for (const run of runs) {
+    const fontName = standardFontName({ family, bold: run.bold, italic: run.italic });
+    const font = loadFont(fontName);
+    for (const ch of run.text.replace(/\r/g, '').replace(/\t/g, '    ')) {
+      if (ch === '\n') {
+        paragraphs.push([]);
+        continue;
+      }
+      const gid = font.encodeCharacter(ch.codePointAt(0)!);
+      if (gid <= 0 && ch !== ' ') {
+        missing.add(ch);
+        continue;
+      }
+      paragraphs[paragraphs.length - 1].push({ ch, font: fontName, gid, adv: font.advanceGlyph(gid) });
     }
-    gids.push(gid);
-    width += font.advanceGlyph(gid);
   }
-  return { gids, width };
+  return paragraphs;
 }
 
-/** Divide il testo in righe che stanno in `maxWidth` punti. Gli a capo esistenti sono rispettati. */
-export function wrapText(font: mupdf.Font, text: string, size: number, maxWidth: number, missing = new Set<string>()): Glyphed[] {
-  const out: Glyphed[] = [];
-  const measure = (s: string) => glyphs(font, s, missing);
-  for (const para of text.split('\n')) {
-    const words = para.split(/ +/);
-    let current = '';
-    for (const word of words) {
-      const candidate = current === '' ? word : `${current} ${word}`;
-      if (measure(candidate).width * size <= maxWidth || current === '') {
-        // Una parola più lunga dell'intera riga viene spezzata a forza.
-        if (current === '' && measure(word).width * size > maxWidth) {
-          let piece = '';
-          for (const ch of word) {
-            if (piece && measure(piece + ch).width * size > maxWidth) {
-              out.push(measure(piece));
-              piece = '';
-            }
-            piece += ch;
-          }
-          current = piece;
-        } else {
-          current = candidate;
+/** Larghezza totale del testo su una sola riga, in em. */
+function runsWidth(runs: TextRun[], family: FontFamily): number {
+  return Math.max(...toGlyphs(runs, family, new Set()).map(lineWidth), 0);
+}
+
+/**
+ * Divide il testo in righe che stanno in `maxWidth` punti, parola per parola.
+ * Gli a capo esistenti sono rispettati; una parola più lunga della riga viene spezzata.
+ */
+export function layoutRuns(runs: TextRun[], family: FontFamily, size: number, maxWidth: number, missing = new Set<string>()): LayoutLine[] {
+  const out: LayoutLine[] = [];
+  const limit = maxWidth / size;
+  for (const para of toGlyphs(runs, family, missing)) {
+    // Parole separate da spazi (più spazi consecutivi valgono come uno).
+    const words: { space: Glyph | null; glyphs: Glyph[] }[] = [];
+    let space: Glyph | null = null;
+    let word: Glyph[] = [];
+    for (const g of para) {
+      if (g.ch === ' ') {
+        if (word.length) words.push({ space, glyphs: word });
+        if (word.length || !space) space = g;
+        word = [];
+      } else word.push(g);
+    }
+    if (word.length) words.push({ space, glyphs: word });
+
+    let line: Glyph[] = [];
+    for (const w of words) {
+      const ww = lineWidth(w.glyphs);
+      if (line.length && lineWidth(line) + (w.space?.adv ?? 0) + ww <= limit) {
+        if (w.space) line.push(w.space);
+        line.push(...w.glyphs);
+        continue;
+      }
+      if (line.length) out.push({ glyphs: line, width: lineWidth(line) });
+      line = [];
+      if (ww <= limit) {
+        line = [...w.glyphs];
+        continue;
+      }
+      for (const g of w.glyphs) {
+        if (line.length && lineWidth(line) + g.adv > limit) {
+          out.push({ glyphs: line, width: lineWidth(line) });
+          line = [];
         }
-      } else {
-        out.push(measure(current));
-        current = word;
+        line.push(g);
       }
     }
-    out.push(measure(current));
+    out.push({ glyphs: line, width: lineWidth(line) });
   }
   return out;
 }
@@ -455,21 +528,24 @@ export function applyTextEdits(doc: mupdf.PDFDocument, index: number, edits: Tex
   let ops = `q ${inv.map(num).join(' ')} cm\n`;
   const reports: EditReport[] = [];
 
-  for (const e of edits) {
-    const missing = new Set<string>();
-    const text = e.text.replace(/\r/g, '').replace(/\t/g, '    ');
-    if (text.trim() === '') {
-      reports.push({ scale: 1, overflow: false, missing: [], bbox: null });
-      continue;
-    }
-    const fontName = standardFontName(e.style);
-    const font = loadFont(fontName);
+  const resourceFor = (fontName: string) => {
     let res = usedFonts.get(fontName);
     if (!res) {
       res = fontResourceName(fonts, fontName);
-      fonts.put(res, doc.addFont(font));
+      fonts.put(res, doc.addFont(loadFont(fontName)));
       usedFonts.set(fontName, res);
     }
+    return res;
+  };
+
+  for (const e of edits) {
+    const missing = new Set<string>();
+    const runs = normalizeRuns(e.runs ?? [{ text: e.text, bold: e.style.bold, italic: e.style.italic }]);
+    if (runs.every((r) => r.text.trim() === '')) {
+      reports.push({ scale: 1, overflow: false, missing: [], bbox: null });
+      continue;
+    }
+    const family = e.style.family;
 
     let x0: number, x1: number, top: number, firstBaseline: number, lineHeight: number, align: Align;
     let maxHeight = Infinity;
@@ -496,13 +572,14 @@ export function applyTextEdits(doc: mupdf.PDFDocument, index: number, edits: Tex
     const fits = (n: number, s: number) => (firstBaseline - top) * s + (n - 1) * lineHeight * s + e.style.size * s * 0.25 <= maxHeight + 1;
 
     let scale = 1;
-    let lines = wrapText(font, text, e.style.size, maxWidth, missing);
+    let lines = layoutRuns(runs, family, e.style.size, maxWidth, missing);
     if (room && !fits(lines.length, 1)) {
       // Prima di rimpicciolire si usa lo spazio libero: una riga singola (titolo, data,
       // etichetta) si allarga di lato; ogni paragrafo può scendere nello spazio vuoto sotto.
       if (singleLine) {
         const extra = (room.right - x1) + (x0 - room.left);
-        const wanted = Math.min(glyphs(font, text, new Set()).width * e.style.size - (x1 - x0), extra);
+        const total = runsWidth(runs, family) * e.style.size;
+        const wanted = Math.min(total - (x1 - x0), extra);
         if (wanted > 0) {
           if (align === 'right') x0 = Math.max(room.left, x0 - wanted);
           else if (align === 'center') {
@@ -511,18 +588,18 @@ export function applyTextEdits(doc: mupdf.PDFDocument, index: number, edits: Tex
             x1 = Math.min(room.right, x1 + half);
           } else x1 = Math.min(room.right, x1 + wanted);
           // Se a destra non c'è abbastanza spazio, la riga si allarga anche a sinistra.
-          const still = glyphs(font, text, new Set()).width * e.style.size - (x1 - x0);
+          const still = total - (x1 - x0);
           if (still > 0 && align === 'left' && x1 >= room.right) x0 = Math.max(room.left, x0 - still);
           maxWidth = (x1 - x0) * 1.02 + 0.5;
         }
       }
       maxHeight = Math.max(maxHeight, room.bottom - top);
-      lines = wrapText(font, text, e.style.size, maxWidth, missing);
+      lines = layoutRuns(runs, family, e.style.size, maxWidth, missing);
     }
     if (e.kind === 'replace' && !e.sizeLocked) {
       while (!fits(lines.length, scale) && scale > MIN_SCALE + 1e-6) {
         scale = Math.max(MIN_SCALE, round(scale - 0.025, 3));
-        lines = wrapText(font, text, e.style.size * scale, maxWidth, missing);
+        lines = layoutRuns(runs, family, e.style.size * scale, maxWidth, missing);
       }
     }
     const overflow = e.kind === 'replace' && !fits(lines.length, scale);
@@ -531,7 +608,7 @@ export function applyTextEdits(doc: mupdf.PDFDocument, index: number, edits: Tex
     const lh = lineHeight * scale;
 
     const [r, g, bl] = e.style.color;
-    ops += `BT /${res} ${num(size)} Tf ${num(r)} ${num(g)} ${num(bl)} rg\n`;
+    ops += `BT ${num(r)} ${num(g)} ${num(bl)} rg\n`;
     let left = Infinity;
     let right = -Infinity;
     lines.forEach((l, i) => {
@@ -539,8 +616,16 @@ export function applyTextEdits(doc: mupdf.PDFDocument, index: number, edits: Tex
       const x = align === 'right' ? x1 - w : align === 'center' ? (x0 + x1 - w) / 2 : x0;
       left = Math.min(left, x);
       right = Math.max(right, x + w);
-      const hex = l.gids.map((gid) => gid.toString(16).padStart(4, '0')).join('');
-      ops += `1 0 0 -1 ${num(x)} ${num(baseline0 + i * lh)} Tm <${hex}> Tj\n`;
+      ops += `1 0 0 -1 ${num(x)} ${num(baseline0 + i * lh)} Tm`;
+      // Ogni gruppo di glifi con lo stesso carattere (normale, grassetto…) in un'unica istruzione.
+      let j = 0;
+      while (j < l.glyphs.length) {
+        const font = l.glyphs[j].font;
+        let hex = '';
+        while (j < l.glyphs.length && l.glyphs[j].font === font) hex += l.glyphs[j++].gid.toString(16).padStart(4, '0');
+        ops += ` /${resourceFor(font)} ${num(size)} Tf <${hex}> Tj`;
+      }
+      ops += '\n';
     });
     ops += 'ET\n';
 
